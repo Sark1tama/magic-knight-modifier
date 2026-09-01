@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
-// @version      3.9.7
+// @version      3.9.9
 // @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
@@ -328,9 +328,13 @@
   const INFO_ROWS = [
     ['stage', '关卡', 'mk-v'],
     ['battleId', '战斗ID', 'mk-v--cyan'],
-    ['minute', '战斗时间', 'mk-v--green'],
+    ['timer', '战斗计时', 'mk-v--green'],
+    ['killCount', '击杀数', 'mk-v--green'],
+    ['goldCount', '本局金币', 'mk-v'],
+    ['level', '局内等级', 'mk-v--purple'],
     ['progressionLevel', '角色进度等级', 'mk-v--purple'],
-    ['skillType', '技能类型', 'mk-v--purple'],
+    ['skillType', '固有技能', 'mk-v--purple'],
+    ['build', '当前构筑', 'mk-v'],
     ['revive', '🔄 复活次数(付费)', 'mk-v--orange', 1],
     ['clearSkill', '💫 清屏次数(付费)', 'mk-v--orange', 0],
   ];
@@ -339,21 +343,60 @@
     ? { type: 'slider', label: esc(key.slice(SKILL_PREFIX.length)), min: 0, max: 20, step: 0.5, unit: 'x', dec: 1 }
     : FIELDS[key];
 
+  // skillType 是固有主动技能的类型 ID(如 4);经 serverSkillPresentationIndex 翻译成技能名,索引未就绪时回退为裸数字
+  function skillTypeText(c) {
+    const t = c.ld.hero?.skillType ?? 0;
+    const idx = c.fc.serverSkillPresentationIndex;
+    if (idx && typeof idx.entries === 'function') {
+      for (const [, v] of idx.entries()) {
+        if (v?.skillType === t && !v.isPassive && v.name) return `${v.name} (${t})`;
+      }
+    }
+    return t;
+  }
+
+  // cocos Label 的文本(.string);节点未建好时回退空串
+  const labelText = l => (l && typeof l.string === 'string' ? l.string : '');
+
+  // 当前技能构筑:ld.activeSkills/passiveSkills [{skillType,level}] 经索引翻译成中文名
+  function buildText(c) {
+    const idx = c.fc.serverSkillPresentationIndex;
+    const nameOf = (t, l, p) => {
+      if (idx && typeof idx.entries === 'function') {
+        for (const [, v] of idx.entries()) {
+          if (v?.skillType === t && v.level === l && !!v.isPassive === !!p && v.name) return v.name;
+        }
+      }
+      return `技能${t}`;
+    };
+    const join = (list, p) => (list || []).map(s => `${nameOf(s.skillType, s.level, p)} Lv.${s.level}`).join('、');
+    const act = join(c.ld.activeSkills, false), pas = join(c.ld.passiveSkills, true);
+    if (!act && !pas) return '无';
+    return [act && `主动:${act}`, pas && `被动:${pas}`].filter(Boolean).join(' | ');
+  }
+
   function readBattle(c) {
     return {
       stage: c.ld.stage ?? 0,
       battleId: c.ld.battleId ?? '',
-      minute: c.ld.battleStartTime ? Math.floor((Date.now() - c.ld.battleStartTime) / 60000) : (c.fc.minute ?? 0),
+      // 战斗计时优先取游戏内 Label("02:51");Label 未就绪时按 battleStartTime 折算分钟
+      timer: labelText(c.fc.secondLabel)
+        || (c.ld.battleStartTime ? `${Math.floor((Date.now() - c.ld.battleStartTime) / 60000)} 分钟` : ''),
+      killCount: labelText(c.fc.killCountLabel),
+      goldCount: labelText(c.fc.goldCountLabel),
+      level: labelText(c.fc.levelLabel),
       revive: c.fc.leftReviveNum ?? 0,
       clearSkill: c.fc.leftClearSkillNum ?? 0,
       progressionLevel: c.ld.hero?.progressionLevel ?? 0,
-      skillType: c.ld.hero?.skillType ?? 0,
+      // skillType 是固有主动技能的类型 ID;经 serverSkillPresentationIndex(键 "type:level:isPassive")翻译成技能名
+      skillType: skillTypeText(c),
+      build: buildText(c),
       ui: Object.fromEntries(Object.entries(FIELDS).map(([k, f]) => [k, f.read(c)])),
     };
   }
 
   /* ══════════ 6. 视图构建 ══════════ */
-  const infoText = (k, bd) => (k === 'minute' ? `${bd.minute} 分钟` : bd[k]);
+  const infoText = (k, bd) => bd[k] ?? '';
   const infoBox = bd => `<div class="mk-info">${INFO_ROWS.map(([k, label, cls, sep]) =>
     `<div class="mk-info-row${sep ? ' mk-info-row--sep' : ''}">
       <span class="mk-k">${label}:</span><b class="${cls}" data-info="${k}">${esc(infoText(k, bd))}</b>
@@ -398,8 +441,11 @@
 
   const SPEED_WARN = '<div class="mk-note mk-note--warn">⚠️ 高危:加速会让客户端时间跑赢服务器——捡特殊宝箱、通关结算这类校验点会被踢回主页(碎片和金币仍保留)。刷碎片可用,正常冲关请勿开启!(加速不参与自动重放,每场需手动开)</div>';
 
+  // 信息 tab:战斗模式的默认首页,集中展示只读运行时信息
+  const infoHtml = bd => `<div class="mk-status mk-status--battle">📋 战斗信息(实时)</div>
+    ${infoBox(bd)}`;
+
   const battleHtml = bd => `<div class="mk-status mk-status--battle">⚔️ 战斗模式（修改立即生效）</div>
-    ${infoBox(bd)}
     ${SECTIONS.map(s => `<div class="mk-section">${s.title}</div>${s.keys.map(k => fieldRow(k, bd.ui[k])).join('')}${s.keys.includes('gameSpeed') ? SPEED_WARN : ''}`).join('')}`;
 
   function readDefaults(c) {
@@ -472,9 +518,10 @@
   const panel = document.createElement('div');
   panel.id = 'magic-knight-modifier';
   panel.innerHTML = `
-    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.7</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
+    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.9</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
     <div id="mk-tabs" style="display:none">
-      <button class="mk-tab active" data-tab="basic">📊 基础</button>
+      <button class="mk-tab active" data-tab="info">📋 信息</button>
+      <button class="mk-tab" data-tab="basic">📊 基础</button>
       <button class="mk-tab" data-tab="advanced">⚙️ 高级</button>
       <button class="mk-tab" data-tab="auto">🤖 自动</button>
     </div>
@@ -484,7 +531,7 @@
   const body = $('#mk-body', panel);
   const tabsEl = $('#mk-tabs', panel);
   const collapseBtn = $('#mk-collapse', panel);
-  let tab = ['basic', 'advanced', 'auto'].includes(persisted.tab) ? persisted.tab : 'basic';
+  let tab = ['info', 'basic', 'advanced', 'auto'].includes(persisted.tab) ? persisted.tab : 'info';
   const locks = new Map();      // key → 锁定值(现在只会出现 heroHP)
   let els = null;
   let lastInBattle = null;
@@ -526,7 +573,7 @@
     tabsEl.style.display = c ? '' : 'none';
     if (c) {
       const bd = readBattle(c);
-      body.innerHTML = tab === 'auto' ? autoHtml() : tab === 'advanced' ? advancedHtml(c, bd) : battleHtml(bd);
+      body.innerHTML = tab === 'auto' ? autoHtml() : tab === 'advanced' ? advancedHtml(c, bd) : tab === 'basic' ? battleHtml(bd) : infoHtml(bd);
       cacheEls();
       return;
     }
