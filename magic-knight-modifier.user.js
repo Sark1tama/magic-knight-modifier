@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
-// @version      3.9.9
+// @version      3.9.11
 // @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
@@ -358,7 +358,8 @@
   // cocos Label 的文本(.string);节点未建好时回退空串
   const labelText = l => (l && typeof l.string === 'string' ? l.string : '');
 
-  // 当前技能构筑:ld.activeSkills/passiveSkills [{skillType,level}] 经索引翻译成中文名
+  // 当前技能构筑:实时数据在 fc.serverActiveSkills/serverPassiveSkills(自带 skillName 中文名);
+  // ld.activeSkills/passiveSkills 只是开局快照,不会随选卡更新,仅作兜底(经索引翻译)
   function buildText(c) {
     const idx = c.fc.serverSkillPresentationIndex;
     const nameOf = (t, l, p) => {
@@ -369,8 +370,11 @@
       }
       return `技能${t}`;
     };
-    const join = (list, p) => (list || []).map(s => `${nameOf(s.skillType, s.level, p)} Lv.${s.level}`).join('、');
-    const act = join(c.ld.activeSkills, false), pas = join(c.ld.passiveSkills, true);
+    const join = (list, p) => (list || []).map(s => `${s.skillName || nameOf(s.skillType, s.level, p)} Lv.${s.level}`).join('、');
+    const live = c.fc.serverActiveSkills || c.fc.serverPassiveSkills;
+    const actList = live ? c.fc.serverActiveSkills : c.ld.activeSkills;
+    const pasList = live ? c.fc.serverPassiveSkills : c.ld.passiveSkills;
+    const act = join(actList, false), pas = join(pasList, true);
     if (!act && !pas) return '无';
     return [act && `主动:${act}`, pas && `被动:${pas}`].filter(Boolean).join(' | ');
   }
@@ -420,21 +424,38 @@
     ${autoTogglesHtml()}
     ${AUTO_NOTE}`;
 
-  function fieldRow(key, uiVal) {
+  // 技能倍率的键是英文运行时名(fireBall 等)。实测倍率表、activeSkillRuntimeTokens、serverActiveSkills
+  // 三者同序(都按获得顺序追加)——按键序对齐翻译中文名,不硬编码映射表;
+  // 用 tokens 过滤掉重放残留的"本场未持有"幽灵键;长度对不齐时回退英文键,绝不猜
+  function skillKeyLabel(c, key) {
+    const multi = readSkillMultipliers(c);
+    const keys = multi ? Object.keys(multi) : [];
+    const server = c?.fc.serverActiveSkills || [];
+    const tok = c?.fc.activeSkillRuntimeTokens;
+    const owned = tok && typeof tok.has === 'function' ? keys.filter(k => tok.has(k)) : keys;
+    if (owned.length && owned.length === server.length) {
+      const i = owned.indexOf(key);
+      if (i >= 0 && server[i]?.skillName) return server[i].skillName;
+    }
+    return key;
+  }
+
+  function fieldRow(key, uiVal, label) {
     const f = resolveField(key);
+    const text = label || f.label;
     if (f.type === 'slider') {
       return `<div class="mk-row">
-        <div class="mk-row-head"><span>${f.label}</span><span class="mk-val" data-val="${key}">${fmt(f, uiVal)}</span></div>
+        <div class="mk-row-head"><span>${text}</span><span class="mk-val" data-val="${key}">${fmt(f, uiVal)}</span></div>
         <input class="mk-range" type="range" data-key="${key}" min="${f.min}" max="${f.max}" step="${f.step}" value="${uiVal}">
       </div>`;
     }
     const locked = locks.has(key);
     return `<div class="mk-row">
       <div class="mk-row-head">
-        <span>${f.label}</span>
+        <span>${text}</span>
         ${f.lockable ? `<button class="mk-lock${locked ? ' on' : ''}" data-lock="${key}">${locked ? '🔒 已锁定' : '🔓 未锁定'}</button>` : ''}
       </div>
-      <input class="mk-input" type="number" data-key="${key}" value="${uiVal}" placeholder="${f.label}">
+      <input class="mk-input" type="number" data-key="${key}" value="${uiVal}" placeholder="${text}">
       ${f.quick?.length ? `<div class="mk-quick">${f.quick.map(q => `<button data-quick="${key}" data-val="${q}">${q}</button>`).join('')}</div>` : ''}
     </div>`;
   }
@@ -468,7 +489,7 @@
     const forgettable = FORGET_KEYS.some(k => userValues.has(k));
     return `<div class="mk-status mk-status--adv">⚙️ 高级配置</div>
       ${names.length
-        ? `<div class="mk-section">🎯 技能倍率 (${names.length}个)</div>${names.map(n => fieldRow(SKILL_PREFIX + n, multi[n])).join('')}`
+        ? `<div class="mk-section">🎯 技能倍率 (${names.length}个)</div>${names.map(n => fieldRow(SKILL_PREFIX + n, multi[n], skillKeyLabel(c, n))).join('')}`
         : `<div class="mk-empty">⚠️ 未检测到技能<br><small>战斗中获取技能后会显示</small></div>`}
       <div class="mk-section">👹 敌人配置</div>
       ${ENEMY_KEYS.map(k => fieldRow(k, bd.ui[k])).join('')}
@@ -518,7 +539,7 @@
   const panel = document.createElement('div');
   panel.id = 'magic-knight-modifier';
   panel.innerHTML = `
-    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.9</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
+    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.11</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
     <div id="mk-tabs" style="display:none">
       <button class="mk-tab active" data-tab="info">📋 信息</button>
       <button class="mk-tab" data-tab="basic">📊 基础</button>
@@ -945,6 +966,9 @@
       for (const n of names) {
         if (!finite(multi[n])) continue;
         const slider = els.fields.get(SKILL_PREFIX + n);
+        // 中文名晚于首次渲染就绪时(presentation 异步挂上),label 还是英文键 → 触发一次重渲染
+        const labelEl = slider?.closest('.mk-row')?.querySelector('.mk-row-head span');
+        if (labelEl && labelEl.textContent !== skillKeyLabel(c, n)) return render();
         if (slider && document.activeElement !== slider) {
           slider.value = multi[n];
           const span = els.vals.get(SKILL_PREFIX + n);
