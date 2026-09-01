@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
-// @version      3.9.13
+// @version      3.9.14
 // @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
@@ -427,14 +427,25 @@
   // 技能倍率的键是英文运行时名(fireBall 等)。实测倍率表、activeSkillRuntimeTokens、serverActiveSkills
   // 三者同序(都按获得顺序追加)——按键序对齐翻译中文名,不硬编码映射表;
   // 用 tokens 过滤掉重放残留的"本场未持有"幽灵键;长度对不齐时回退英文键,绝不猜
+  // 返回与 serverActiveSkills 对齐后的键序(下标即技能位),无法对齐返回 null
+  function alignSkillKeys(c, keys) {
+    const server = c?.fc.serverActiveSkills || [];
+    const tok = c?.fc.activeSkillRuntimeTokens;
+    // tokens 是异步填充的(开局瞬间可能还没就绪):有幽灵键时靠它过滤;
+    // 没有幽灵键(键数==服务器技能数)时直接用原始键序对齐,避免开局短暂显示英文
+    const owned = tok && typeof tok.has === 'function' ? keys.filter(k => tok.has(k)) : keys;
+    if (owned.length && owned.length === server.length) return owned;
+    if (keys.length && keys.length === server.length) return keys;
+    return null;
+  }
+
   function skillKeyLabel(c, key) {
     const multi = readSkillMultipliers(c);
     const keys = multi ? Object.keys(multi) : [];
-    const server = c?.fc.serverActiveSkills || [];
-    const tok = c?.fc.activeSkillRuntimeTokens;
-    const owned = tok && typeof tok.has === 'function' ? keys.filter(k => tok.has(k)) : keys;
-    if (owned.length && owned.length === server.length) {
-      const i = owned.indexOf(key);
+    const aligned = alignSkillKeys(c, keys);
+    if (aligned) {
+      const server = c?.fc.serverActiveSkills || [];
+      const i = aligned.indexOf(key);
       if (i >= 0 && server[i]?.skillName) return server[i].skillName;
     }
     return key;
@@ -539,7 +550,7 @@
   const panel = document.createElement('div');
   panel.id = 'magic-knight-modifier';
   panel.innerHTML = `
-    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.13</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
+    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.14</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
     <div id="mk-tabs" style="display:none">
       <button class="mk-tab active" data-tab="info">📋 信息</button>
       <button class="mk-tab" data-tab="basic">📊 基础</button>
@@ -654,12 +665,10 @@
       const cur = readSkillMultipliers(c) || {};
       const keys = Object.keys(cur);
       const server = c.fc.serverActiveSkills || [];
-      const tok = c.fc.activeSkillRuntimeTokens;
-      const owned = tok && typeof tok.has === 'function' ? keys.filter(k => tok.has(k)) : keys;
-      const aligned = owned.length > 0 && owned.length === server.length;
+      const alignedKeys = alignSkillKeys(c, keys);
       for (const k of keys) {
         if (k in restored) continue;
-        const s = aligned ? server[owned.indexOf(k)] : null;
+        const s = alignedKeys ? server[alignedKeys.indexOf(k)] : null;
         const orig = s && typeof c.fc.resolveActiveSkillDamageMultiplier === 'function'
           ? c.fc.resolveActiveSkillDamageMultiplier(s.skillType, s.level || 1) : null;
         if (finite(orig) && orig > 0) restored[k] = orig;
