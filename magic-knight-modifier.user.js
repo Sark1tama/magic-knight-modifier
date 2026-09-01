@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
-// @version      3.9.12
+// @version      3.9.13
 // @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
@@ -539,7 +539,7 @@
   const panel = document.createElement('div');
   panel.id = 'magic-knight-modifier';
   panel.innerHTML = `
-    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.12</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
+    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.13</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
     <div id="mk-tabs" style="display:none">
       <button class="mk-tab active" data-tab="info">📋 信息</button>
       <button class="mk-tab" data-tab="basic">📊 基础</button>
@@ -644,9 +644,29 @@
       pd[dk] = d[dk];
       if (c.ld.hero) c.ld.hero[hk] = d[dk];
     }
-    if (d.skillDamageMultipliers && typeof d.skillDamageMultipliers === 'object') {
+    const snapMulti0 = d.skillDamageMultipliers;
+    const snapMulti = typeof snapMulti0 === 'string' ? safeParse(snapMulti0) : snapMulti0;
+    if (snapMulti && typeof snapMulti === 'object') {
+      const restored = { ...snapMulti };
+      // 开局后新获得的技能不在 default 快照里,直接用快照覆盖会把它们的倍率条目抹掉
+      // (伤害计算读不到条目就回退基础伤害,可能低于设计值)。
+      // 按 v3.9.11 的同序对齐找到 skillType+当前等级,用游戏自己的公式 resolveActiveSkillDamageMultiplier 补算原始倍率
+      const cur = readSkillMultipliers(c) || {};
+      const keys = Object.keys(cur);
+      const server = c.fc.serverActiveSkills || [];
+      const tok = c.fc.activeSkillRuntimeTokens;
+      const owned = tok && typeof tok.has === 'function' ? keys.filter(k => tok.has(k)) : keys;
+      const aligned = owned.length > 0 && owned.length === server.length;
+      for (const k of keys) {
+        if (k in restored) continue;
+        const s = aligned ? server[owned.indexOf(k)] : null;
+        const orig = s && typeof c.fc.resolveActiveSkillDamageMultiplier === 'function'
+          ? c.fc.resolveActiveSkillDamageMultiplier(s.skillType, s.level || 1) : null;
+        if (finite(orig) && orig > 0) restored[k] = orig;
+        // 无法对齐/补算的键直接丢弃,与旧行为一致(回到游戏缺省)
+      }
       pd.skillDamageMultipliers = typeof pd.skillDamageMultipliers === 'string'
-        ? JSON.stringify(d.skillDamageMultipliers) : d.skillDamageMultipliers;
+        ? JSON.stringify(restored) : restored;
     }
     // 清掉相关记忆与锁定,否则自动重放/锁定会立刻把恢复的值再改回去
     for (const k of [...userValues.keys()]) if (k.startsWith(SKILL_PREFIX)) userValues.delete(k);
