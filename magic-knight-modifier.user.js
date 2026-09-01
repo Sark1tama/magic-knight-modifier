@@ -1,11 +1,23 @@
 // ==UserScript==
 // @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
-// @version      3.9.5
+// @version      3.9.7
 // @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
-// @match        https://www.douyu.com/*
+// @match        *://*.douyu.com/0*
+// @match        *://*.douyu.com/1*
+// @match        *://*.douyu.com/2*
+// @match        *://*.douyu.com/3*
+// @match        *://*.douyu.com/4*
+// @match        *://*.douyu.com/5*
+// @match        *://*.douyu.com/6*
+// @match        *://*.douyu.com/7*
+// @match        *://*.douyu.com/8*
+// @match        *://*.douyu.com/9*
+// @match        *://*.douyu.com/beta/*
+// @match        *://*.douyu.com/topic/*
+// @match        *://*.douyu.com/pages/vibe-lab-act202608-game/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -310,6 +322,8 @@
     { title: '🎁 掉落物',   keys: ['fireDrop', 'magnetDrop', 'healthDrop', 'fireDmg', 'healPct'] },
   ];
   const ENEMY_KEYS = ['maxEnemyBossNum', 'maxEnemyRangeNum', 'maxEnemyNearNum', 'maxPropNum'];
+  // 不在游戏 default 快照里、只能靠"清记忆+下场由服务器重发原值"恢复的字段
+  const FORGET_KEYS = ['fireDrop', 'magnetDrop', 'healthDrop', 'fireDmg', 'healPct', ...ENEMY_KEYS];
   // 敌人配置字段不在这里显示(高级页可查看/设置),只保留只读的运行时信息
   const INFO_ROWS = [
     ['stage', '关卡', 'mk-v'],
@@ -404,6 +418,8 @@
   function advancedHtml(c, bd) {
     const multi = readSkillMultipliers(c);
     const names = multi ? Object.keys(multi) : [];
+    const hasDefaults = !!readDefaults(c);
+    const forgettable = FORGET_KEYS.some(k => userValues.has(k));
     return `<div class="mk-status mk-status--adv">⚙️ 高级配置</div>
       ${names.length
         ? `<div class="mk-section">🎯 技能倍率 (${names.length}个)</div>${names.map(n => fieldRow(SKILL_PREFIX + n, multi[n])).join('')}`
@@ -412,7 +428,10 @@
       ${ENEMY_KEYS.map(k => fieldRow(k, bd.ui[k])).join('')}
       <div class="mk-section">📊 基础属性原始值</div>
       <div class="mk-defaults" id="mk-defaults">${defaultsHtml(c)}</div>
-      ${readDefaults(c) ? '<div class="mk-quick"><button data-restore>↩️ 恢复默认属性(含技能倍率)</button></div>' : ''}`;
+      ${hasDefaults || forgettable ? `<div class="mk-quick">
+        ${hasDefaults ? '<button data-restore>↩️ 恢复默认属性(含技能倍率)</button>' : ''}
+        ${forgettable ? '<button data-forget title="清除掉落率/火焰伤害/血瓶回血/敌人上限的已保存记忆,下一场战斗起恢复游戏原值(本场已改的不会复原)">🧹 清除掉落/敌人记忆</button>' : ''}
+      </div>` : ''}`;
   }
 
   function readHome() {
@@ -453,7 +472,7 @@
   const panel = document.createElement('div');
   panel.id = 'magic-knight-modifier';
   panel.innerHTML = `
-    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.5</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
+    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.7</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
     <div id="mk-tabs" style="display:none">
       <button class="mk-tab active" data-tab="basic">📊 基础</button>
       <button class="mk-tab" data-tab="advanced">⚙️ 高级</button>
@@ -569,6 +588,15 @@
     render();
   }
 
+  // 掉落率/火焰伤害/血瓶回血/敌人上限不在 default 快照里,无法就地"恢复原值";
+  // 但它们每场开局由服务器随 launchData 重新下发——清掉记忆、不再重放,下一场即回到游戏原值。
+  // 本场已改动的值无法复原,在下一场生效(按钮 title 已注明)
+  function forgetExtras() {
+    for (const k of FORGET_KEYS) userValues.delete(k);
+    persist();
+    render();
+  }
+
   /* ══════════ 9. 事件委托 ══════════ */
   // 修正:tab 按钮在 #mk-body 外面,委托必须挂在 panel 上才能收到冒泡
   panel.addEventListener('click', e => {
@@ -601,6 +629,7 @@
       return refreshLockUI(key); // ATK 无锁按钮,内部有 null 检查,安全
     }
     if (e.target.closest('[data-restore]')) return restoreDefaults();
+    if (e.target.closest('[data-forget]')) return forgetExtras();
     if (e.target.closest('[data-retry]')) return boot();
   });
 
