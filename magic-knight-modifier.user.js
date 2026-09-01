@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
-// @version      3.9.11
+// @version      3.9.12
 // @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
@@ -539,7 +539,7 @@
   const panel = document.createElement('div');
   panel.id = 'magic-knight-modifier';
   panel.innerHTML = `
-    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.11</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
+    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.12</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
     <div id="mk-tabs" style="display:none">
       <button class="mk-tab active" data-tab="info">📋 信息</button>
       <button class="mk-tab" data-tab="basic">📊 基础</button>
@@ -840,7 +840,8 @@
   }
 
   // 自动选技能:弹窗打开后稳定 800ms 再选,选择中(isSelectionLocked)不重复触发;
-  // 选了但弹窗没关则轮换下一张卡兜底;玩家 3 秒内有点屏则不出手(避免手动/脚本抢点把弹窗状态机卡死)
+  // 选了但弹窗没关则轮换下一张卡兜底;玩家 3 秒内有点屏则不出手(避免手动/脚本抢点把弹窗状态机卡死)。
+  // 弹窗有两种:exp=升级三选一,box=宝箱技能三选一(捡技能宝箱后服务器发 csList 弹出,selectCard 同链路)
   const AUTO_PICK_DELAY_MS = 800;
   const AUTO_PICK_MIN_INTERVAL = 1500;
   const MANUAL_INPUT_GRACE_MS = 3000;
@@ -872,7 +873,7 @@
     if (!popupFirstSeenAt) { popupFirstSeenAt = now; lastTriedCardIdx = -1; return; }
     if (now - popupFirstSeenAt < AUTO_PICK_DELAY_MS) return;
     if (now - lastAutoPickAt < AUTO_PICK_MIN_INTERVAL) return;
-    if (comp.isSelectionLocked || comp.type !== 'exp' || !comp.cardItems.length) return;
+    if (comp.isSelectionLocked || !['exp', 'box'].includes(comp.type) || !comp.cardItems.length) return;
     // 偏好可组合:已有优先 = 已持有且未满级排前;高级优先 = 同组内等级高的排前;都不开则保持游戏原顺序
     let order = comp.cardItems;
     if (preferUpgrade || preferHigh) {
