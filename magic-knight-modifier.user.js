@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         魔法骑士修改器 v3.9.5
+// @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
 // @version      3.9.5
-// @description  斗鱼"魔法骑士"修改器 - 配置驱动 + 事件委托 + 状态持久化/自动重放 + 恢复默认
+// @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
 // @match        https://www.douyu.com/*
