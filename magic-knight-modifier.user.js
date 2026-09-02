@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
-// @version      3.9.14
+// @version      3.9.16
 // @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
@@ -105,6 +105,9 @@
     .mk-lock{font-size:10px;padding:2px 6px;border-radius:3px;border:1px solid #666;background:#2d2d44;color:#aaa;cursor:pointer;}
     .mk-lock.on{border-color:#ffd700;background:#ffd700;color:#000;}
     .mk-chip{display:inline-block;background:#2d2d44;padding:6px 10px;border-radius:4px;}
+    .mk-input--mini{width:54px;padding:2px 4px;background:#2d2d44;border:1px solid #444;border-radius:4px;color:#ffd700;font-size:11px;text-align:center;}
+    .mk-mini-btn{font-size:10px;padding:2px 8px;border-radius:3px;border:1px solid #444;background:#2d2d44;color:#aaa;cursor:pointer;}
+    .mk-mini-btn:hover{border-color:#667eea;color:#fff;}
     .mk-note{font-size:10px;color:#888;margin-top:4px;background:#2d2d44;padding:6px 10px;border-radius:4px;}
     .mk-note--warn{color:#ff9800;}
     .mk-empty{color:#888;font-size:11px;text-align:center;padding:12px;background:#252540;border-radius:6px;margin:8px 0;}
@@ -133,6 +136,9 @@
   );
   let replayEnabled = persisted.replay !== false; // 默认开启
   let autoNext = persisted.autoNext === true;     // 自动开始下一场战斗,默认关闭
+  // 自动开战场数上限(0=无限)与已自动开战计数;达到上限后停开,收结算不受影响
+  let autoNextLimit = finite(persisted.autoNextLimit) && persisted.autoNextLimit > 0 ? Math.floor(persisted.autoNextLimit) : 0;
+  let autoNextCount = finite(persisted.autoNextCount) && persisted.autoNextCount > 0 ? Math.floor(persisted.autoNextCount) : 0;
   let autoPick = persisted.autoPick === true;     // 升级弹窗自动选技能,默认关闭
   let preferUpgrade = persisted.preferUpgrade === true; // 自动选技能时优先升级已有技能,默认关闭
   let preferHigh = persisted.preferHigh === true;   // 自动选技能时高级(等级高)优先,默认关闭
@@ -148,6 +154,8 @@
         pos: panel.style.left ? { left: panel.style.left, top: panel.style.top } : null,
         replay: replayEnabled,
         autoNext,
+        autoNextLimit,
+        autoNextCount,
         autoPick,
         preferUpgrade,
         preferHigh,
@@ -358,18 +366,21 @@
   // cocos Label 的文本(.string);节点未建好时回退空串
   const labelText = l => (l && typeof l.string === 'string' ? l.string : '');
 
-  // 当前技能构筑:实时数据在 fc.serverActiveSkills/serverPassiveSkills(自带 skillName 中文名);
-  // ld.activeSkills/passiveSkills 只是开局快照,不会随选卡更新,仅作兜底(经索引翻译)
-  function buildText(c) {
-    const idx = c.fc.serverSkillPresentationIndex;
-    const nameOf = (t, l, p) => {
-      if (idx && typeof idx.entries === 'function') {
-        for (const [, v] of idx.entries()) {
-          if (v?.skillType === t && v.level === l && !!v.isPassive === !!p && v.name) return v.name;
-        }
+  // 经 serverSkillPresentationIndex(键 "skillType:level:isPassive")翻译技能中文名;未就绪返回 null
+  function skillCnName(c, t, l, p) {
+    const idx = c?.fc.serverSkillPresentationIndex;
+    if (idx && typeof idx.entries === 'function') {
+      for (const [, v] of idx.entries()) {
+        if (v?.skillType === t && v.level === l && !!v.isPassive === !!p && v.name) return v.name;
       }
-      return `技能${t}`;
-    };
+    }
+    return null;
+  }
+
+  // 当前技能构筑:实时数据在 fc.serverActiveSkills/serverPassiveSkills(skillName 可能未水合为 null,
+  // 此时经索引翻译兜底);ld.activeSkills/passiveSkills 只是开局快照,不会随选卡更新,仅作兜底
+  function buildText(c) {
+    const nameOf = (t, l, p) => skillCnName(c, t, l, p) || `技能${t}`;
     const join = (list, p) => (list || []).map(s => `${s.skillName || nameOf(s.skillType, s.level, p)} Lv.${s.level}`).join('、');
     const live = c.fc.serverActiveSkills || c.fc.serverPassiveSkills;
     const actList = live ? c.fc.serverActiveSkills : c.ld.activeSkills;
@@ -415,10 +426,11 @@
     <label class="mk-toggle" style="padding-left:18px;"><input type="checkbox" data-preferhigh ${preferHigh ? 'checked' : ''}> ↳ 高级优先(等级高的先选)</label>
     <div class="mk-section">🏠 主页</div>
     <label class="mk-toggle"><input type="checkbox" data-autonext ${autoNext ? 'checked' : ''}> ⚔️ 自动开始下一场战斗</label>
+    <div class="mk-toggle" style="padding-left:18px;cursor:default;">↳ 场数上限 <input type="number" class="mk-input--mini" data-autonextlimit min="0" step="1" value="${autoNextLimit}"> 场(0=无限) · 已自动 <b class="mk-v" data-autocount>${autoNextCount}</b> 场${autoNextLimit > 0 && autoNextCount >= autoNextLimit ? ' <b class="mk-v--orange">已达上限</b>' : ''} <button class="mk-mini-btn" data-autoreset>重置</button></div>
     <div class="mk-section">🖥️ 环境</div>
     <label class="mk-toggle"><input type="checkbox" data-focuskeep ${focusKeep ? 'checked' : ''}> 🔆 防后台暂停(切tab/遮挡;失焦拦截为预防)</label>`;
 
-  const AUTO_NOTE = '<div class="mk-note">挂机链路:自动开战 → 重放配置 → 自动选技能 → 打完自动点"收下"收结算回主页循环。折叠面板后自动化照常生效。<br>说明:实测游戏目前<b>没有失焦暂停机制</b>,失焦(blur)拦截是预防游戏将来加上的;实际生效的是切 tab/遮挡时的 visibility 欺骗。<br>注意:窗口被<b>最小化或被最大化窗口完全遮挡</b>时浏览器会强制停帧,反暂停救不了。可在 edge://flags 关闭 "Calculate window occlusion"(需重启浏览器)彻底解除遮挡停帧。</div>';
+  const AUTO_NOTE = '<div class="mk-note">挂机链路:自动开战 → 重放配置 → 自动选技能 → 打完自动点"收下"收结算回主页循环。折叠面板后自动化照常生效。<br>场数上限:0=无限;达到上限后自动停开(当前局的收结算不受影响),改上限或点"重置计数"重新开始。<br>说明:实测游戏目前<b>没有失焦暂停机制</b>,失焦(blur)拦截是预防游戏将来加上的;实际生效的是切 tab/遮挡时的 visibility 欺骗。<br>注意:窗口被<b>最小化或被最大化窗口完全遮挡</b>时浏览器会强制停帧,反暂停救不了。可在 edge://flags 关闭 "Calculate window occlusion"(需重启浏览器)彻底解除遮挡停帧。</div>';
 
   const autoHtml = () => `<div class="mk-status mk-status--adv">🤖 自动化</div>
     ${autoTogglesHtml()}
@@ -446,7 +458,9 @@
     if (aligned) {
       const server = c?.fc.serverActiveSkills || [];
       const i = aligned.indexOf(key);
-      if (i >= 0 && server[i]?.skillName) return server[i].skillName;
+      const s = i >= 0 ? server[i] : null;
+      // skillName 开局瞬间可能未水合(null)——经索引翻译兜底,与构筑同款
+      if (s) return s.skillName || skillCnName(c, s.skillType, s.level, false) || key;
     }
     return key;
   }
@@ -550,7 +564,7 @@
   const panel = document.createElement('div');
   panel.id = 'magic-knight-modifier';
   panel.innerHTML = `
-    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.14</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
+    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.16</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
     <div id="mk-tabs" style="display:none">
       <button class="mk-tab active" data-tab="info">📋 信息</button>
       <button class="mk-tab" data-tab="basic">📊 基础</button>
@@ -727,6 +741,7 @@
     }
     if (e.target.closest('[data-restore]')) return restoreDefaults();
     if (e.target.closest('[data-forget]')) return forgetExtras();
+    if (e.target.closest('[data-autoreset]')) { autoNextCount = 0; persist(); return render(); }
     if (e.target.closest('[data-retry]')) return boot();
   });
 
@@ -746,6 +761,13 @@
     if (t.matches('[data-preferupgrade]')) { preferUpgrade = t.checked; return persist(); }
     if (t.matches('[data-preferhigh]')) { preferHigh = t.checked; return persist(); }
     if (t.matches('[data-focuskeep]')) { focusKeep = t.checked; return persist(); }
+    if (t.matches('[data-autonextlimit]')) {
+      const v = Math.floor(parseFloat(t.value));
+      autoNextLimit = finite(v) && v > 0 ? v : 0;
+      autoNextCount = 0; // 新预算重新计数
+      persist();
+      return render();
+    }
     if (t.type === 'number' && t.dataset.key) applyUserValue(t.dataset.key, parseFloat(t.value));
   });
 
@@ -847,25 +869,33 @@
   // 直接调 Cocos 层 startHostGame 的教训(v3.9.4):能开局但 React 主页不知道,主页一直盖住战斗画面。
   function clickHomeStartButton() {
     const f = getFrame();
-    if (!f) return false;
+    if (!f) return null;
     let doc;
-    try { doc = f.contentDocument; } catch { return false; }
+    try { doc = f.contentDocument; } catch { return null; }
     const btn = doc?.querySelector('button[data-type="game"]');
-    if (!btn) return false;              // 主页 React 未挂载(停在任务/天梯等 tab)时等下周期
-    if (btn.disabled) return true;       // 正在进入游戏(isLaunching),当作已触发
+    if (!btn) return null;                 // 主页 React 未挂载(停在任务/天梯等 tab)时等下周期
+    if (btn.disabled) return 'busy';       // 正在进入游戏(isLaunching),当作已触发但不重复计数
     btn.click();
-    return true;
+    return 'clicked';
   }
 
   function tryAutoNext() {
     if (!autoNext) return;
+    if (autoNextLimit > 0 && autoNextCount >= autoNextLimit) return; // 场数已达上限(收结算不受影响)
     const now = Date.now();
     if (now - lastAutoStartTry < AUTO_NEXT_RETRY_MS) return;
     const app = getAppComp();
     if (!app || app.hostStartPromise) return; // 开局进行中,交给游戏自身去重
     if (hasActiveBattleSession(app)) return;  // 闸门1:上一局未结算完,等下个周期
     if (hasBlockingPopup()) return;           // 闸门2:弹窗未关,等下个周期
-    if (clickHomeStartButton()) lastAutoStartTry = now; // 没找到按钮不消耗节流,下拍继续找
+    const r = clickHomeStartButton();
+    if (!r) return;                           // 没找到按钮不消耗节流,下拍继续找
+    lastAutoStartTry = now;
+    if (r === 'clicked') {
+      autoNextCount++;
+      persist();
+      render(); // 刷新"已自动 N 场 / 已达上限"显示
+    }
   }
 
   // 自动选技能:弹窗打开后稳定 800ms 再选,选择中(isSelectionLocked)不重复触发;
