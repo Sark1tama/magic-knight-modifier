@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
-// @version      3.9.16
+// @version      3.9.17
 // @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
@@ -427,6 +427,7 @@
     <div class="mk-section">🏠 主页</div>
     <label class="mk-toggle"><input type="checkbox" data-autonext ${autoNext ? 'checked' : ''}> ⚔️ 自动开始下一场战斗</label>
     <div class="mk-toggle" style="padding-left:18px;cursor:default;">↳ 场数上限 <input type="number" class="mk-input--mini" data-autonextlimit min="0" step="1" value="${autoNextLimit}"> 场(0=无限) · 已自动 <b class="mk-v" data-autocount>${autoNextCount}</b> 场${autoNextLimit > 0 && autoNextCount >= autoNextLimit ? ' <b class="mk-v--orange">已达上限</b>' : ''} <button class="mk-mini-btn" data-autoreset>重置</button></div>
+    ${autoNextHaltReason ? `<div class="mk-note mk-note--warn">⚠️ ${autoNextHaltReason}</div>` : ''}
     <div class="mk-section">🖥️ 环境</div>
     <label class="mk-toggle"><input type="checkbox" data-focuskeep ${focusKeep ? 'checked' : ''}> 🔆 防后台暂停(切tab/遮挡;失焦拦截为预防)</label>`;
 
@@ -564,7 +565,7 @@
   const panel = document.createElement('div');
   panel.id = 'magic-knight-modifier';
   panel.innerHTML = `
-    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.16</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
+    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.17</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
     <div id="mk-tabs" style="display:none">
       <button class="mk-tab active" data-tab="info">📋 信息</button>
       <button class="mk-tab" data-tab="basic">📊 基础</button>
@@ -756,7 +757,12 @@
   body.addEventListener('change', e => {
     const t = e.target;
     if (t.matches('[data-replay]')) { replayEnabled = t.checked; return persist(); }
-    if (t.matches('[data-autonext]')) { autoNext = t.checked; return persist(); }
+    if (t.matches('[data-autonext]')) {
+      autoNext = t.checked;
+      if (autoNext) { autoNextFailCount = 0; lastAutoClickAt = 0; autoNextHaltReason = ''; } // 手动重开 = 用户已处理(刷新页面等),清零重新计数
+      persist();
+      return render();
+    }
     if (t.matches('[data-autopick]')) { autoPick = t.checked; return persist(); }
     if (t.matches('[data-preferupgrade]')) { preferUpgrade = t.checked; return persist(); }
     if (t.matches('[data-preferhigh]')) { preferHigh = t.checked; return persist(); }
@@ -829,6 +835,11 @@
   const AUTO_NEXT_GRACE_MS = 6000;
   const AUTO_NEXT_RETRY_MS = 8000;
   let lastAutoStartTry = 0;
+  // 开局失败保护:点了"出战"但 15s 后仍停在主页 = 服务器拒绝(实测错误码 1050029:token 过期/未开播);
+  // 连续 3 次失败则自动停开并在面板上提示,避免无限空点
+  const AUTO_NEXT_FAIL_MS = 15000;
+  const AUTO_NEXT_MAX_FAIL = 3;
+  let autoNextFailCount = 0, lastAutoClickAt = 0, autoNextHaltReason = '';
 
   // 对局 session 仍活跃 = 结算/上报未完成,此时 startHostGame 会把上一局打断成"通关失败"
   function hasActiveBattleSession(app) {
@@ -883,6 +894,17 @@
     if (!autoNext) return;
     if (autoNextLimit > 0 && autoNextCount >= autoNextLimit) return; // 场数已达上限(收结算不受影响)
     const now = Date.now();
+    // 点了"出战"却超时仍停在主页(本函数只在主页分支被调)= 开局被服务器拒绝
+    if (lastAutoClickAt && now - lastAutoClickAt > AUTO_NEXT_FAIL_MS) {
+      lastAutoClickAt = 0;
+      if (++autoNextFailCount >= AUTO_NEXT_MAX_FAIL) {
+        autoNext = false;
+        autoNextHaltReason = '连续 3 次开局失败(token 过期或主播未开播,实测错误码 1050029),已暂停自动开战——请刷新直播间页面后重新勾选';
+        console.warn('[魔法骑士]', autoNextHaltReason);
+        persist();
+        return render();
+      }
+    }
     if (now - lastAutoStartTry < AUTO_NEXT_RETRY_MS) return;
     const app = getAppComp();
     if (!app || app.hostStartPromise) return; // 开局进行中,交给游戏自身去重
@@ -893,6 +915,7 @@
     lastAutoStartTry = now;
     if (r === 'clicked') {
       autoNextCount++;
+      lastAutoClickAt = now;
       persist();
       render(); // 刷新"已自动 N 场 / 已达上限"显示
     }
@@ -975,12 +998,17 @@
         }
         lastHomeSig = null;               // 强制主页重渲染
         lastAutoStartTry = Date.now() - AUTO_NEXT_RETRY_MS + AUTO_NEXT_GRACE_MS; // 宽限期后再首次尝试
-      } else if (replayEnabled) {
+      } else {
+        // 成功进战斗:清零开局失败计数(手动开局也算,说明服务器链路是通的)
+        autoNextFailCount = 0;
+        lastAutoClickAt = 0;
+        if (replayEnabled) {
         // 进入战斗:重放用户记住的配置(HP 会因 autoLock 重新上锁);开关关闭则本场保持游戏原值
         // gameSpeed 是高危功能(服务器时间校验),不参与自动重放,每场需手动开启
         for (const [k, v] of userValues) {
           if (k === 'gameSpeed') continue;
           applyField(k, v, c);
+        }
         }
       }
       return render();
