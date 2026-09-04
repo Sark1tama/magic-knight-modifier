@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         魔法骑士修改器
 // @namespace    http://tampermonkey.net/
-// @version      3.9.17
+// @version      3.9.18
 // @description  斗鱼"魔法骑士"小游戏修改器 - 属性/掉落/技能倍率实时修改 + 配置持久化自动重放 + 全托管挂机(自动开战/收结算/选技能) + 防后台暂停
 // @author       Sark1tama
 // @license      MIT
@@ -565,7 +565,7 @@
   const panel = document.createElement('div');
   panel.id = 'magic-knight-modifier';
   panel.innerHTML = `
-    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.17</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
+    <div id="mk-header"><span>⚔️ 魔法骑士 v3.9.18</span><span id="mk-collapse" title="折叠/展开">▾</span></div>
     <div id="mk-tabs" style="display:none">
       <button class="mk-tab active" data-tab="info">📋 信息</button>
       <button class="mk-tab" data-tab="basic">📊 基础</button>
@@ -831,9 +831,15 @@
       (dm.roles || []).map(r => [r.asset, r.HPLevel, r.ATKLevel, r.selected])]);
   }
 
-  // 自动开战节流:进入主页后有个宽限期,之后每 8s 最多尝试一次
-  const AUTO_NEXT_GRACE_MS = 6000;
-  const AUTO_NEXT_RETRY_MS = 8000;
+  // 反风控:所有自动化节奏带随机抖动——固定间隔(6s 宽限/8s 节流/800ms 选卡)本身就是 bot 指纹。
+  // 每次重新摇,落在区间内即可;不做正态分布之类的花活
+  const rnd = (min, max) => min + Math.random() * (max - min);
+
+  // 自动开战节流:进入主页后有 6~15s 随机宽限期,之后每 8~20s 随机尝试一次
+  const AUTO_NEXT_GRACE = () => rnd(6000, 15000);
+  const AUTO_NEXT_RETRY = () => rnd(8000, 20000);
+  let autoNextGraceMs = AUTO_NEXT_GRACE();
+  let autoNextRetryMs = AUTO_NEXT_RETRY();
   let lastAutoStartTry = 0;
   // 开局失败保护:点了"出战"但 15s 后仍停在主页 = 服务器拒绝(实测错误码 1050029:token 过期/未开播);
   // 连续 3 次失败则自动停开并在面板上提示,避免无限空点
@@ -857,12 +863,17 @@
   // fight 组件也在(面板仍是战斗模式),闸门1/2 永远挡着,自动下一关就死在结算页。
   // 这里代点"收下"——只碰 fightStop 的 collectBtnEvent(自带 isActionLocked 去重,奖励服务器已发,纯关闭动作);
   // 复活等付费弹窗结构不同、不会命中,绝不误触。
+  // 结算页出现后停 1~4s 随机再点——秒点"收下"也是 bot 指纹
+  let settleFirstSeenAt = 0, settleDelayMs = 0;
   function tryAutoCollect() {
     if (!autoNext) return;
     const w = getWin();
     if (!w) return;
     const fs = walk(w, node => node.name === 'fightStop' && node.activeInHierarchy ? node : null, 5);
-    if (!fs) return;
+    if (!fs) { settleFirstSeenAt = 0; return; }
+    const now = Date.now();
+    if (!settleFirstSeenAt) { settleFirstSeenAt = now; settleDelayMs = rnd(1000, 4000); return; }
+    if (now - settleFirstSeenAt < settleDelayMs) return;
     const comp = (fs.components || []).find(c => typeof c.collectBtnEvent === 'function');
     if (!comp || comp.isActionLocked) return; // 已点过/退场动画中,等它自己关
     const collectBtn = (function dive(n) {
@@ -905,7 +916,7 @@
         return render();
       }
     }
-    if (now - lastAutoStartTry < AUTO_NEXT_RETRY_MS) return;
+    if (now - lastAutoStartTry < autoNextRetryMs) return;
     const app = getAppComp();
     if (!app || app.hostStartPromise) return; // 开局进行中,交给游戏自身去重
     if (hasActiveBattleSession(app)) return;  // 闸门1:上一局未结算完,等下个周期
@@ -913,6 +924,7 @@
     const r = clickHomeStartButton();
     if (!r) return;                           // 没找到按钮不消耗节流,下拍继续找
     lastAutoStartTry = now;
+    autoNextRetryMs = AUTO_NEXT_RETRY(); // 每次尝试后重摇间隔
     if (r === 'clicked') {
       autoNextCount++;
       lastAutoClickAt = now;
@@ -921,13 +933,14 @@
     }
   }
 
-  // 自动选技能:弹窗打开后稳定 800ms 再选,选择中(isSelectionLocked)不重复触发;
-  // 选了但弹窗没关则轮换下一张卡兜底;玩家 3 秒内有点屏则不出手(避免手动/脚本抢点把弹窗状态机卡死)。
+  // 自动选技能:弹窗打开后停 0.8~3s 随机再选(固定 800ms 是 bot 指纹),选择中(isSelectionLocked)不重复触发;
+  // 选了但弹窗没关则隔 1.5~4s 随机轮换下一张卡兜底;玩家 3 秒内有点屏则不出手(避免手动/脚本抢点把弹窗状态机卡死)。
   // 弹窗有两种:exp=升级三选一,box=宝箱技能三选一(捡技能宝箱后服务器发 csList 弹出,selectCard 同链路)
-  const AUTO_PICK_DELAY_MS = 800;
-  const AUTO_PICK_MIN_INTERVAL = 1500;
+  const AUTO_PICK_DELAY = () => rnd(800, 3000);
+  const AUTO_PICK_INTERVAL = () => rnd(1500, 4000);
   const MANUAL_INPUT_GRACE_MS = 3000;
   let popupFirstSeenAt = 0, lastAutoPickAt = 0, lastTriedCardIdx = -1;
+  let popupPickDelayMs = AUTO_PICK_DELAY(), autoPickIntervalMs = AUTO_PICK_INTERVAL();
   let lastManualInputAt = 0;
 
   // 监听游戏 iframe 内的手动点屏(同源,一次性挂接)
@@ -952,9 +965,9 @@
     if (!comp) { popupFirstSeenAt = 0; lastTriedCardIdx = -1; return; }
     const now = Date.now();
     if (now - lastManualInputAt < MANUAL_INPUT_GRACE_MS) return; // 玩家在操作,让位
-    if (!popupFirstSeenAt) { popupFirstSeenAt = now; lastTriedCardIdx = -1; return; }
-    if (now - popupFirstSeenAt < AUTO_PICK_DELAY_MS) return;
-    if (now - lastAutoPickAt < AUTO_PICK_MIN_INTERVAL) return;
+    if (!popupFirstSeenAt) { popupFirstSeenAt = now; lastTriedCardIdx = -1; popupPickDelayMs = AUTO_PICK_DELAY(); return; }
+    if (now - popupFirstSeenAt < popupPickDelayMs) return;
+    if (now - lastAutoPickAt < autoPickIntervalMs) return;
     if (comp.isSelectionLocked || !['exp', 'box'].includes(comp.type) || !comp.cardItems.length) return;
     // 偏好可组合:已有优先 = 已持有且未满级排前;高级优先 = 同组内等级高的排前;都不开则保持游戏原顺序
     let order = comp.cardItems;
@@ -972,6 +985,7 @@
     const item = order[lastTriedCardIdx];
     if (!item?.data) return;
     lastAutoPickAt = now;
+    autoPickIntervalMs = AUTO_PICK_INTERVAL(); // 每次出手后重摇轮换间隔
     console.info('[魔法骑士] 自动选择技能:', item.data?.name ?? `卡${item.index}`, item.data);
     try {
       comp.selectCard(item); // 与真实点击同一入口,内部走动画/锁定/skillChoose 请求
@@ -997,7 +1011,8 @@
           persist();
         }
         lastHomeSig = null;               // 强制主页重渲染
-        lastAutoStartTry = Date.now() - AUTO_NEXT_RETRY_MS + AUTO_NEXT_GRACE_MS; // 宽限期后再首次尝试
+        autoNextGraceMs = AUTO_NEXT_GRACE(); // 每次回主页重摇宽限期
+        lastAutoStartTry = Date.now() - autoNextRetryMs + autoNextGraceMs; // 宽限期后再首次尝试
       } else {
         // 成功进战斗:清零开局失败计数(手动开局也算,说明服务器链路是通的)
         autoNextFailCount = 0;
